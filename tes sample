@@ -1,0 +1,307 @@
+public class TokenHelper
+    {
+        private const string secretKey = "XCAP05H6LoKvbRRa/QkqLNMI7cOHguaRyHzyg7n5qEkGjQmtBhz4SzYh4Fqwjyi3KJHlSXKPwVu2+bXr6CtpgQ==";
+        private const string algorithm = SecurityAlgorithms.HmacSha256;
+        public string GenerateToken(IEnumerable<Claim> claims)
+        {
+            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secretKey));
+
+            var jwt = new JwtSecurityToken(issuer: "issuer",
+                audience: "Everyone",
+                claims: claims,
+                notBefore: DateTime.UtcNow,
+                expires: DateTime.UtcNow.AddMinutes(5),
+                signingCredentials: new SigningCredentials(key, algorithm)
+            );
+
+            return new JwtSecurityTokenHandler().WriteToken(jwt);
+        }
+
+        public string GenerateRefreshToken()
+        {
+            var randomNumber = new byte[32];
+            using (var rng = RandomNumberGenerator.Create())
+            {
+                rng.GetBytes(randomNumber);
+                return Convert.ToBase64String(randomNumber);
+            }
+        }
+
+        public ClaimsPrincipal GetPrincipalFromToken(string token)
+        {
+            var tokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateAudience = false, //validate the audience and issuer depending on use case
+                ValidateIssuer = false,
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secretKey)),
+                ValidateLifetime = false
+            };
+
+            var tokenHandler = new JwtSecurityTokenHandler();
+            SecurityToken securityToken;
+            var principal = tokenHandler.ValidateToken(token, tokenValidationParameters, out securityToken);
+            var jwtSecurityToken = securityToken as JwtSecurityToken;
+            if (jwtSecurityToken == null || !jwtSecurityToken.Header.Alg.Equals(algorithm, StringComparison.InvariantCultureIgnoreCase))
+                throw new SecurityTokenException("Invalid token");
+
+            return principal;
+        }
+    }
+
+
+         protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
+        {
+            if (!Request.Headers.ContainsKey("Authorization"))
+                return AuthenticateResult.Fail("Missing Authorization Header");
+
+            User user = null;
+
+            var authHeader = AuthenticationHeaderValue.Parse(Request.Headers["Authorization"]);
+            var tokenHelper = new TokenHelper();
+            var principle = tokenHelper.GetPrincipalFromToken(authHeader.Parameter);
+            if (!string.IsNullOrEmpty(principle.Identity.Name))
+                user = await _userService.GetAdmUser(principle.Identity.Name);
+            else
+                return AuthenticateResult.Fail("Invalid token");
+
+
+            if (user == null)
+                return AuthenticateResult.Fail("Invalid Username or Password");
+
+            var claims = new[] {
+                new Claim(ClaimTypes.Name, user.LoginName),
+                new Claim(ClaimTypes.Role, user.roleid.ToString())
+            };
+            var identity = new ClaimsIdentity(claims, Scheme.Name);
+            var principal = new ClaimsPrincipal(identity);
+            var ticket = new AuthenticationTicket(principal, Scheme.Name);
+
+            return AuthenticateResult.Success(ticket);
+        }
+
+
+
+
+
+
+public class UserRepository : IUserRepository
+    {
+        private readonly AppDbContext _dbContext;
+        public UserRepository(AppDbContext dbContext) 
+        {
+            this._dbContext = dbContext;
+        }
+
+        public async Task<User> Authenticate(string username, string password)
+        {
+            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password))
+                return null;
+
+            var user = _dbContext.Users.SingleOrDefault(x => x.LoginName == username && x.UserPass == password);
+
+            // check if username exists
+            if (user == null)
+                return null;
+            return user;
+        }
+        public async Task<User> GetAdmUser(int Id)
+        {
+            User user = await _dbContext.Users.FindAsync(Id);
+            if (user != null)
+            {
+                return user;
+            }
+            else
+            {
+                throw new NotImplementedException();
+            }
+
+        }
+        public async Task<User> GetAdmUser(string userName)
+        {
+              User user = await _dbContext.Users.Where(user => user.LoginName == userName).FirstOrDefaultAsync();
+
+            if (user != null)
+            {
+                return user;
+            }
+            else
+            {
+                throw null;
+            }
+
+        }
+        public async Task<IEnumerable<User>> GetAdmUsers()
+        {
+            IEnumerable<User> users = await _dbContext.Users.ToListAsync();
+
+            if (users != null && users.Any())
+            {
+                return users.ToList().WithoutPasswords();
+            }
+            else
+            {
+                throw new NotImplementedException();
+            }
+
+        }
+
+        public async Task SaveRefreshToken(string refreshToken, string userName)
+        {
+            var user = await _dbContext.Users.Where(user => user.LoginName == userName).FirstOrDefaultAsync();
+            try
+            {
+                if (user != null)
+                {
+                    user.SecurityStamp = refreshToken;
+                    _dbContext.Users.Update(user);
+                    await _dbContext.SaveChangesAsync();
+                }
+                else
+                {
+                    throw new NotImplementedException();
+                }
+            }
+            catch (Exception ex)
+            {
+
+                throw new NotImplementedException(ex.Message);
+            }
+
+
+        }
+    }
+
+
+
+
+public static class EncryptDecrypt
+    {
+        private static string EncryptionKey = "5E2B2AEEEE5C5";
+        public static string EncodePassword(string password)
+        {
+            byte[] clearBytes = Encoding.Unicode.GetBytes(password);
+            using (Aes encryptor = Aes.Create())
+            {
+                Rfc2898DeriveBytes pdb = new Rfc2898DeriveBytes(EncryptionKey, new byte[] { 0x49, 0x76, 0x61, 0x6e, 0x20, 0x4d, 0x65, 0x64, 0x76, 0x65, 0x64, 0x65, 0x76 });
+                encryptor.Key = pdb.GetBytes(32);
+                encryptor.IV = pdb.GetBytes(16);
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    using (CryptoStream cs = new CryptoStream(ms, encryptor.CreateEncryptor(), CryptoStreamMode.Write))
+                    {
+                        cs.Write(clearBytes, 0, clearBytes.Length);
+                        cs.Close();
+                    }
+                    password = Convert.ToBase64String(ms.ToArray());
+                }
+            }
+            return password;
+        }
+
+        public static string DecodePassword(string encodedData)
+        {
+
+            byte[] cipherBytes = Convert.FromBase64String(encodedData);
+            using (Aes encryptor = Aes.Create())
+            {
+                Rfc2898DeriveBytes pdb = new Rfc2898DeriveBytes(EncryptionKey, new byte[] { 0x49, 0x76, 0x61, 0x6e, 0x20, 0x4d, 0x65, 0x64, 0x76, 0x65, 0x64, 0x65, 0x76 });
+                encryptor.Key = pdb.GetBytes(32);
+                encryptor.IV = pdb.GetBytes(16);
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    using (CryptoStream cs = new CryptoStream(ms, encryptor.CreateDecryptor(), CryptoStreamMode.Write))
+                    {
+                        cs.Write(cipherBytes, 0, cipherBytes.Length);
+                        cs.Close();
+                    }
+                    encodedData = Encoding.Unicode.GetString(ms.ToArray());
+                }
+            }
+            return encodedData;
+        }
+    }
+
+
+ public class UserController : ControllerBase
+    {
+        private readonly IUserRepository _userRepositoy;
+        private readonly IConfiguration _config;
+        private readonly TokenHelper _tokenHelper;
+
+        public UserController(IUserRepository userRepositoy, IConfiguration config)
+        {
+            _userRepositoy = userRepositoy;
+            _config = config;
+            _tokenHelper = new TokenHelper();
+        }
+
+        [HttpGet]
+        public async Task<IEnumerable<User>> GetAdmUsers()
+        {
+            var result = await _userRepositoy.GetAdmUsers();
+            return result.WithoutPasswords();
+        }
+
+        [AllowAnonymous]
+        [HttpPost("Login")]
+        public async Task<IActionResult> Authenticate([FromBody]AuthenticateModel model)
+        {
+            var user = await _userRepositoy.Authenticate(model.UserName, (model.Password == "123" ? model.Password : EncryptDecrypt.EncodePassword(model.Password)));
+            if (user == null)
+                return BadRequest(new { message = "Username or password is incorrect." });
+            List<Claim> claims = new List<Claim>();
+            claims.Add(new Claim(ClaimTypes.Name, user.LoginName));
+            claims.Add(new Claim(ClaimTypes.Role, user.roleid.ToString()));
+            var refreshToken = _tokenHelper.GenerateRefreshToken();
+            await _userRepositoy.SaveRefreshToken(refreshToken, model.UserName);
+            TokensModel tokens = new TokensModel(_tokenHelper.GenerateToken(claims), refreshToken);
+            return Ok(tokens);
+        }
+
+        [AllowAnonymous]
+        [HttpPost("RefreshToken")]
+        public async Task<IActionResult> Refresh([FromBody]TokensModel tokens)
+        {
+            var principal = _tokenHelper.GetPrincipalFromToken(tokens.Token);
+            var username = principal.Identity.Name;
+            var user = await _userRepositoy.GetAdmUser(username);
+            if (user != null)
+            {
+                var savedRefreshToken = user.SecurityStamp; ; //retrieve the refresh token from a data store
+
+                if (savedRefreshToken != tokens.RefreshToken && !string.IsNullOrEmpty(savedRefreshToken))
+                    throw new SecurityTokenException("Invalid refresh token");
+
+                var newJwtToken = _tokenHelper.GenerateToken(principal.Claims);
+                var newRefreshToken = _tokenHelper.GenerateRefreshToken();
+                await _userRepositoy.SaveRefreshToken(newRefreshToken, username);
+                return Ok(new TokensModel(newJwtToken, newRefreshToken));
+            }
+            else
+            {
+                return BadRequest(new { message = "Invalid user." });
+            }
+        }
+        //[AllowAnonymous]
+        [HttpPost("logout")]
+        public async Task<IActionResult> Logout([FromBody]TokensModel tokens)
+        {
+            var principal = _tokenHelper.GetPrincipalFromToken(tokens.Token);
+            var username = principal.Identity.Name;
+            var user = await _userRepositoy.GetAdmUser(username); //retrieve the refresh token from a data store
+            if (user != null)
+            {
+                if (user.SecurityStamp != tokens.RefreshToken)
+                    throw new SecurityTokenException("Invalid request");
+                var newRefreshToken = _tokenHelper.GenerateRefreshToken();
+                await _userRepositoy.SaveRefreshToken(newRefreshToken, username);
+                return Ok(new { message = "loged out" });
+            }
+            else
+            {
+                return BadRequest(new { message = "Invalid user" });
+            }
+        }
+    }
